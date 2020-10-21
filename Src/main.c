@@ -73,6 +73,15 @@ typedef struct {
   /* Ожидаемая позиция пальца в угловом соотношении. */
   uint8_t RequiredPosition;
   
+  /* Минимальное значение потенциометра после колибровки. */
+  uint16_t MinADCValue;
+  
+  /* Максимальное значение потенциометра после колибровки. */
+  uint16_t MaxADCValue;
+  
+  /* Значение потенциометра. */
+  uint16_t* ADCValue;
+  
   /* Структура GPIO к которой подключен вывод мотора для движения вперед
   (Движение вперед - при подаче логической единицы на этот пин мотор будет
   разжимать палец). */
@@ -98,6 +107,7 @@ typedef struct {
   FingerStruct* RingFinder;
   FingerStruct* LittleFinger;
   FingerStruct* ThumbFinger;
+  FingerStruct* ThumbFingerFlexion;
 } HandStruct;
 
 typedef struct {
@@ -188,6 +198,12 @@ void SystemClock_Config(void);
 */
 HandStruct* Hand_Init();
 
+/**
+* @brief  Выполнение колибровки указанного пальца.
+* @param  finger Структура, с набором характеристик пальца.
+*/
+void CalibrateFinger(FingerStruct* finger);
+
 /** 
 * @brief Выполняет инициализацию конфигурации отдельного пальца. Выполняет 
 *       установку конфигурации пина в соотвесвтующие поля структуры.
@@ -197,9 +213,10 @@ HandStruct* Hand_Init();
 * @param  motorBackward Структура GPIO к которой подключен вывод мотора для движения назад. 
 *       (Движение назад - при подаче логической единицы на этот пин мотор будет сжимать палец).
 * @param  pinBackward Номер пина к которому подключен вывод мотора для движения вперед.
+* @param  ADCValue Указатель на значение АЦП.
 * @retval Структура, в которой содержится конфигурация отдельного пальца.
 */
-FingerStruct* Finger_Init(GPIO_TypeDef *motorForward, uint16_t pinForward, GPIO_TypeDef *motorBackward, uint16_t pinBackward);
+FingerStruct* Finger_Init(GPIO_TypeDef *motorForward, uint16_t pinForward, GPIO_TypeDef *motorBackward, uint16_t pinBackward, uint16_t* ADCValue);
 
 /** 
 * @brief Выполняет инициализацию конфигурации отдельного пальца. 
@@ -233,22 +250,29 @@ HandStruct* Hand_Init()
   HandStruct* newHandConfig = (HandStruct*)malloc(sizeof(HandStruct));
   memset(newHandConfig, 0, sizeof(HandStruct));
   
-  newHandConfig->PointerFinger = Finger_Init(GPIOB, GPIO_PIN_0, 
-                                             GPIOB, GPIO_PIN_1);
-  newHandConfig->LittleFinger = Finger_Init(GPIOB, GPIO_PIN_0, 
-                                             GPIOB, GPIO_PIN_1);
-  newHandConfig->MiddleFinger = Finger_Init(GPIOB, GPIO_PIN_0, 
-                                             GPIOB, GPIO_PIN_1);
+  // MOTOR 1
+  newHandConfig->LittleFinger = Finger_Init(GPIOB, GPIO_PIN_10, 
+                                             GPIOB, GPIO_PIN_11, (uint16_t*)&ADC_Data[6]);
+  // MOTOR 2
   newHandConfig->RingFinder = Finger_Init(GPIOB, GPIO_PIN_0, 
-                                             GPIOB, GPIO_PIN_1);
-  newHandConfig->ThumbFinger = Finger_Init(GPIOB, GPIO_PIN_0, 
-                                             GPIOB, GPIO_PIN_1);
-  
+                                             GPIOB, GPIO_PIN_1, (uint16_t*)&ADC_Data[5]);
+  // MOTOR 3
+  newHandConfig->MiddleFinger = Finger_Init(GPIOB, GPIO_PIN_3, 
+                                             GPIOB, GPIO_PIN_12, (uint16_t*)&ADC_Data[4]);
+  // MOTOR 4
+  newHandConfig->PointerFinger = Finger_Init(GPIOB, GPIO_PIN_5, 
+                                             GPIOB, GPIO_PIN_4, (uint16_t*)&ADC_Data[3]);
+  // MOTOR 5
+  newHandConfig->ThumbFinger = Finger_Init(GPIOB, GPIO_PIN_6, 
+                                             GPIOB, GPIO_PIN_7, (uint16_t*)&ADC_Data[2]);
+  // MOTOR 6
+  newHandConfig->ThumbFingerFlexion = Finger_Init(GPIOB, GPIO_PIN_8, 
+                                             GPIOB, GPIO_PIN_9, (uint16_t*)&ADC_Data[1]);
   
   return newHandConfig;
 }
 
-FingerStruct* Finger_Init(GPIO_TypeDef *motorForward, uint16_t pinForward, GPIO_TypeDef *motorBackward, uint16_t pinBackward)
+FingerStruct* Finger_Init(GPIO_TypeDef *motorForward, uint16_t pinForward, GPIO_TypeDef *motorBackward, uint16_t pinBackward, uint16_t* ADCValue)
 {
   FingerStruct* configFinger = (FingerStruct*)malloc(sizeof(FingerStruct));
   memset(configFinger, 0, sizeof(FingerStruct));
@@ -257,6 +281,7 @@ FingerStruct* Finger_Init(GPIO_TypeDef *motorForward, uint16_t pinForward, GPIO_
   configFinger->GPIO_Motor_PinForward = pinForward;
   configFinger->GPIO_MotorBackward = motorBackward;
   configFinger->GPIO_Motor_PinBackward = pinBackward;
+  configFinger->ADCValue = ADCValue;
   
   return configFinger;
 }
@@ -268,43 +293,342 @@ void Finger_Stop(FingerStruct* finger)
 {
   HAL_GPIO_WritePin(finger->GPIO_MotorForward, finger->GPIO_Motor_PinForward, GPIO_PIN_RESET);
   HAL_GPIO_WritePin(finger->GPIO_MotorBackward, finger->GPIO_Motor_PinBackward, GPIO_PIN_RESET);
-
-  //HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_SET);
-  //HAL_GPIO_WritePin(GPIOB, GPIO_PIN_1, GPIO_PIN_SET);
 }
 
 /**
-* @brief  Движение мотора вперед.
+* @brief  Движение мотора вперед (сжатие).
 */
 void Finger_Forward(FingerStruct* finger)
 {
   HAL_GPIO_WritePin(finger->GPIO_MotorForward, finger->GPIO_Motor_PinForward, GPIO_PIN_SET);
   HAL_GPIO_WritePin(finger->GPIO_MotorBackward, finger->GPIO_Motor_PinBackward, GPIO_PIN_RESET);
-
-//  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_SET);
-//  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_1, GPIO_PIN_RESET);
 }
 
 /**
-* @brief  Движение мотора назад.
+* @brief  Движение мотора назад (разжатие).
 */
 void Finger_Backward(FingerStruct* finger)
 {
   HAL_GPIO_WritePin(finger->GPIO_MotorForward, finger->GPIO_Motor_PinForward, GPIO_PIN_RESET);
   HAL_GPIO_WritePin(finger->GPIO_MotorBackward, finger->GPIO_Motor_PinBackward, GPIO_PIN_SET);
-  
-//  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_RESET);
-//  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_1, GPIO_PIN_SET);
 }
 
 /**
-* @brief  Выполняет расчет текущего кол-ва оборотов устройства.
-* @param  resistorValue Значение, полученное 
-* с резистивного датчика, определяющего поворот мотора.
+* @brief  Выполняет установку положения пальца в указанною позицию.
+* @param  finger Структура, с набором характеристик пальца.
 */
-void Calculate_Turns(int resistorValue)
-{
+void Set_Finger_Position(FingerStruct* finger)
+{ //0 - разжато, 180 - сжато
+  uint16_t angle = finger->RequiredPosition - finger->Position;
+  uint16_t reqPosition = abs(angle) * ((finger->MaxADCValue - finger->MinADCValue) / 180);
   
+  if (angle > 0) {
+    //Сжать руку на angle градусов
+    Finger_Forward(finger);
+    while(true) {
+      if (*finger->ADCValue <= reqPosition) {
+        Finger_Stop(finger);
+        
+        break;
+      }
+    }
+  } else {
+    //Разжать руку на angle градусов
+    Finger_Backward(finger);
+    while(true) {
+      if (*finger->ADCValue >= reqPosition) {
+        Finger_Stop(finger);
+        
+        break;
+      }
+    }
+  }
+  
+  finger->Position = finger->RequiredPosition;
+}
+
+/**
+* @brief  Выполняет установку положения пальца в указанною позицию.
+* @param  hand Структура, с набором характеристик руки.
+*/
+/*
+void Set_Hand_Position(HandStruct* hand)
+{
+  uint16_t LittleFingerAngle = hand->LittleFinger->RequiredPosition - hand->LittleFinger->Position;
+  uint16_t RingFinderAngle = hand->RingFinder->RequiredPosition - hand->RingFinder->Position;
+  uint16_t MiddleFingerAngle = hand->MiddleFinger->RequiredPosition - hand->MiddleFinger->Position;
+  uint16_t PointerFingerAngle = hand->PointerFinger->RequiredPosition - hand->PointerFinger->Position;
+  uint16_t ThumbFingerFlexionAngle = hand->ThumbFingerFlexion->RequiredPosition - hand->ThumbFingerFlexion->Position;
+  uint16_t ThumbFingerAngle = hand->ThumbFinger->RequiredPosition - hand->ThumbFinger->Position;
+  
+  uint16_t LittleFingerReqPosition = abs(LittleFingerAngle) * ((hand->LittleFinger->MaxADCValue - hand->LittleFinger->MinADCValue) / 180);
+  uint16_t RingFinderReqPosition = abs(RingFinderAngle) * ((hand->RingFinder->MaxADCValue - hand->RingFinder->MinADCValue) / 180);
+  uint16_t MiddleFingerReqPosition = abs(MiddleFingerAngle) * ((hand->MiddleFinger->MaxADCValue - hand->MiddleFinger->MinADCValue) / 180);
+  uint16_t PointerFingerReqPosition = abs(PointerFingerAngle) * ((hand->PointerFinger->MaxADCValue - hand->PointerFinger->MinADCValue) / 180);
+  uint16_t ThumbFingerFlexionReqPosition = abs(ThumbFingerFlexionAngle) * ((hand->ThumbFingerFlexion->MaxADCValue - hand->ThumbFingerFlexion->MinADCValue) / 180);
+  uint16_t ThumbFingerReqPosition = abs(ThumbFingerAngle) * ((hand->ThumbFinger->MaxADCValue - hand->ThumbFinger->MinADCValue) / 180);
+  
+  bool LittleFingerSeted = false;
+  bool RingFinderSeted = false;
+  bool MiddleFingerSeted = false;
+  bool PointerFingerSeted = false;
+  bool ThumbFingerFlexionSeted = false;
+  bool RequiredPositionSeted = false;
+  
+  
+}
+*/
+
+/**
+* @brief  Выполнение колибровки руки.
+* @param  hand Структура, с набором характеристик руки.
+*/
+void Calibrate(HandStruct* hand)
+{
+  CalibrateFinger(hand->LittleFinger);
+  CalibrateFinger(hand->RingFinder);
+  CalibrateFinger(hand->MiddleFinger);
+  
+  uint16_t PointerFingerADCMaxPosition = *(hand->PointerFinger->ADCValue);
+  uint16_t ThumbFingerADCMaxPosition = *(hand->ThumbFinger->ADCValue);
+  uint16_t ThumbFingerFlexionADCMaxPosition = *(hand->ThumbFingerFlexion->ADCValue);
+  
+  uint16_t PointerFingerADCMinPosition;
+  uint16_t ThumbFingerADCMinPosition;
+  uint16_t ThumbFingerFlexionADCMinPosition;
+  
+  uint32_t receiveTimeMs = HAL_GetTick();
+  
+  Finger_Backward(hand->PointerFinger);
+  Finger_Backward(hand->ThumbFinger);
+  Finger_Backward(hand->ThumbFingerFlexion);
+  
+  bool PointerFingerCalibrated = false;
+  bool ThumbFingerCalibrated = false;
+  bool ThumbFingerFlexionCalibrated = false;
+  
+  uint8_t ConfirmPointerFinger = 100;
+  uint8_t ConfirmThumbFinger = 100;
+  uint8_t ConfirmThumbFingerFlexion = 100;
+  
+  //Установка максимальных значений при разжатии пальцев (значениея малы ~100-200)
+  while(true) {
+    uint32_t tmpTimeMs = HAL_GetTick();
+    
+    if (receiveTimeMs + 4000 < tmpTimeMs)
+    {
+      receiveTimeMs = tmpTimeMs;
+      
+      if (PointerFingerCalibrated && ThumbFingerFlexionCalibrated && ThumbFingerCalibrated) {
+        break;
+      }
+      
+      if (!PointerFingerCalibrated) {
+        if (ConfirmPointerFinger < 1) {
+          PointerFingerADCMaxPosition = *(hand->PointerFinger->ADCValue);
+          Finger_Stop(hand->PointerFinger);
+          PointerFingerCalibrated = true;
+          ConfirmPointerFinger = 100;
+        }
+        
+        if (*(hand->PointerFinger->ADCValue) + 150 < PointerFingerADCMaxPosition) {
+          PointerFingerADCMaxPosition = *(hand->PointerFinger->ADCValue);      
+        } else {
+          ConfirmPointerFinger--;
+        }
+      }
+      
+      if (!ThumbFingerCalibrated) {
+        if (ConfirmThumbFinger < 1) {
+          ThumbFingerADCMaxPosition = *(hand->ThumbFinger->ADCValue);
+          Finger_Stop(hand->ThumbFinger);
+          ThumbFingerCalibrated = true;
+          ConfirmThumbFinger = 100;
+        }
+        
+        if (*(hand->ThumbFinger->ADCValue) + 150 < ThumbFingerADCMaxPosition) {
+          ThumbFingerADCMaxPosition = *(hand->ThumbFinger->ADCValue);      
+        } else {
+          ConfirmThumbFinger--;
+        }
+      }
+      
+      if (!ThumbFingerFlexionCalibrated) {
+        if (ConfirmThumbFingerFlexion < 1) {
+          ThumbFingerFlexionADCMaxPosition = *(hand->ThumbFingerFlexion->ADCValue);
+          Finger_Stop(hand->ThumbFingerFlexion);
+          ThumbFingerFlexionCalibrated = true;
+          ConfirmThumbFingerFlexion = 100;
+        }
+        
+        if (*(hand->ThumbFingerFlexion->ADCValue) + 150 < ThumbFingerFlexionADCMaxPosition) {
+          ThumbFingerFlexionADCMaxPosition = *(hand->ThumbFingerFlexion->ADCValue);      
+        } else {
+          ConfirmThumbFingerFlexion--;
+        }
+      }      
+    }
+  }  
+
+  PointerFingerADCMinPosition = PointerFingerADCMaxPosition;
+  ThumbFingerADCMinPosition = ThumbFingerADCMaxPosition;
+  ThumbFingerFlexionADCMinPosition = ThumbFingerFlexionADCMaxPosition;
+  
+  Finger_Forward(hand->ThumbFinger);
+  
+  while(true) {
+    uint32_t tmpTimeMs = HAL_GetTick();
+    
+    if (receiveTimeMs + 4000 < tmpTimeMs)
+    {
+      receiveTimeMs = tmpTimeMs;
+      
+      if (ConfirmThumbFinger < 1) {
+        ThumbFingerADCMinPosition = *(hand->ThumbFinger->ADCValue);
+        Finger_Stop(hand->ThumbFinger);
+        
+        break;
+      }
+      
+      if (*(hand->ThumbFinger->ADCValue) - 150 > ThumbFingerADCMinPosition) {
+        ThumbFingerADCMinPosition = *(hand->ThumbFinger->ADCValue);      
+      } else {
+        ConfirmThumbFinger--;
+      }
+    }  
+  }
+  
+  hand->ThumbFinger->MaxADCValue = ThumbFingerADCMaxPosition - 150;
+  hand->ThumbFinger->MinADCValue = ThumbFingerADCMinPosition + 150;
+  hand->ThumbFinger->Position = 180;
+  hand->ThumbFinger->RequiredPosition = 0;
+  Set_Finger_Position(hand->ThumbFinger);
+  
+  Finger_Forward(hand->ThumbFingerFlexion);
+  
+  while(true) {
+    uint32_t tmpTimeMs = HAL_GetTick();
+    
+    if (receiveTimeMs + 4000 < tmpTimeMs)
+    {
+      receiveTimeMs = tmpTimeMs;
+      
+      if (ConfirmThumbFingerFlexion < 1) {
+        ThumbFingerFlexionADCMinPosition = *(hand->ThumbFingerFlexion->ADCValue);
+        Finger_Stop(hand->ThumbFingerFlexion);
+        
+        break;
+      }
+      
+      if (*(hand->ThumbFingerFlexion->ADCValue) - 150 > ThumbFingerFlexionADCMinPosition) {
+        ThumbFingerFlexionADCMinPosition = *(hand->ThumbFingerFlexion->ADCValue);      
+      } else {
+        ConfirmThumbFingerFlexion--;
+      }
+    }  
+  }
+  
+  hand->ThumbFingerFlexion->MaxADCValue = ThumbFingerFlexionADCMaxPosition - 150;
+  hand->ThumbFingerFlexion->MinADCValue = ThumbFingerFlexionADCMinPosition + 150;
+  hand->ThumbFingerFlexion->Position = 180;
+  hand->ThumbFingerFlexion->RequiredPosition = 0;
+  Set_Finger_Position(hand->ThumbFingerFlexion);
+  
+  Finger_Forward(hand->PointerFinger);
+  
+  while(true) {
+    uint32_t tmpTimeMs = HAL_GetTick();
+    
+    if (receiveTimeMs + 4000 < tmpTimeMs)
+    {
+      receiveTimeMs = tmpTimeMs;
+      
+      if (ConfirmPointerFinger < 1) {
+        PointerFingerADCMinPosition = *(hand->PointerFinger->ADCValue);
+        Finger_Stop(hand->PointerFinger);
+        
+        break;
+      }
+      
+      if (*(hand->PointerFinger->ADCValue) - 150 > PointerFingerADCMinPosition) {
+        PointerFingerADCMinPosition = *(hand->PointerFinger->ADCValue);      
+      } else {
+        ConfirmPointerFinger--;
+      }
+    }  
+  }
+  
+  hand->PointerFinger->MaxADCValue = PointerFingerADCMaxPosition - 150;
+  hand->PointerFinger->MinADCValue = PointerFingerADCMinPosition + 150;
+  hand->PointerFinger->Position = 180;
+  hand->PointerFinger->RequiredPosition = 180;
+}
+
+void CalibrateFinger(FingerStruct* finger)
+{
+  uint8_t Confirm = 100;
+  uint16_t FingerADCMaxPosition = *(finger->ADCValue);  //Максимальное значение с потенциометра
+  uint16_t FingerADCMinPosition;                        //Минимальное значение с потенциометра
+  
+  uint32_t receiveTimeMs = HAL_GetTick();
+    
+  Finger_Backward(finger);
+  
+  //Установка максимального значения при разжатии пальца (значение мало ~100-200)
+  while(true) {
+    uint32_t tmpTimeMs = HAL_GetTick();
+    
+    if (receiveTimeMs + 4000 < tmpTimeMs)
+    {
+      receiveTimeMs = tmpTimeMs;
+      
+      if (Confirm < 1) {
+        FingerADCMaxPosition = *(finger->ADCValue);
+        Finger_Stop(finger);
+        Confirm = 100;
+        
+        break;
+      }
+      
+      if (*(finger->ADCValue) + 150 < FingerADCMaxPosition) {
+        FingerADCMaxPosition = *(finger->ADCValue);      
+      } else {
+        Confirm--;
+      }
+    }  
+  }
+    
+  FingerADCMinPosition = FingerADCMaxPosition;
+  Finger_Forward(finger);
+  
+  //Установка минимального значений при сжатии пальца (значение велико ~3700-4000)
+  while(true) {
+    uint32_t tmpTimeMs = HAL_GetTick();
+    
+    if (receiveTimeMs + 4000 < tmpTimeMs)
+    {
+      receiveTimeMs = tmpTimeMs;
+      
+      if (Confirm < 1) {
+        FingerADCMinPosition = *(finger->ADCValue);
+        Finger_Stop(finger);
+        
+        break;
+      }
+      
+      if (*(finger->ADCValue) - 150 > FingerADCMinPosition) {
+        FingerADCMinPosition = *(finger->ADCValue);      
+      } else {
+        Confirm--;
+      }
+    }  
+  }  
+  
+  finger->MaxADCValue = FingerADCMaxPosition - 150;
+  finger->MinADCValue = FingerADCMinPosition + 150;
+  
+  finger->Position = 180;
+  finger->RequiredPosition = 180;
 }
 
 /**
@@ -401,6 +725,7 @@ int main(void)
   MX_TIM2_Init();
   MX_USART1_UART_Init();
   MX_SPI2_Init();
+  MX_TIM3_Init();
   /* USER CODE BEGIN 2 */
   
   HandConfig = Hand_Init();
@@ -409,7 +734,8 @@ int main(void)
   // HAL_ADC_Stop_DMA(&hadc1);
   
   CAN_Init();
-  HAL_TIM_Base_Start_IT(&htim2);
+  //HAL_TIM_Base_Start_IT(&htim2);
+  //HAL_TIM_Base_Start_IT(&htim3);
   
   uartLastReceiveTimeMs = 0;
   
@@ -419,7 +745,8 @@ int main(void)
   //HAL_GPIO_WritePin(GPIOB, GPIO_PIN_1, GPIO_PIN_SET);
   HandConfig->CurrentRegime = InitializationMode;
   
-  HAL_Delay(10000);
+  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_SET);
+  //Calibrate(HandConfig);
   
   HandConfig->CurrentRegime = SleepMode;
   
@@ -429,6 +756,26 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+    
+    Finger_Forward(HandConfig->LittleFinger);
+    Finger_Forward(HandConfig->MiddleFinger);
+    Finger_Forward(HandConfig->PointerFinger);
+    Finger_Forward(HandConfig->RingFinder);
+    Finger_Forward(HandConfig->ThumbFinger);
+    HAL_Delay(2000);
+    Finger_Backward(HandConfig->LittleFinger);
+    Finger_Backward(HandConfig->MiddleFinger);
+    Finger_Backward(HandConfig->PointerFinger);
+    Finger_Backward(HandConfig->RingFinder);
+    Finger_Backward(HandConfig->ThumbFinger);
+    HAL_Delay(2000);
+    Finger_Stop(HandConfig->LittleFinger);
+    Finger_Stop(HandConfig->MiddleFinger);
+    Finger_Stop(HandConfig->PointerFinger);
+    Finger_Stop(HandConfig->RingFinder);
+    Finger_Stop(HandConfig->ThumbFinger);
+    HAL_Delay(2000);
+    
     //for(int i=0;i<6;i++)
     //{
       //float u;
@@ -497,6 +844,14 @@ void SystemClock_Config(void)
 }
 
 /* USER CODE BEGIN 4 */
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+  char text[20];
+  sprintf(text, "%d,%d\n", HAL_GetTick(), ADC_Data[0]);
+  HAL_UART_Transmit(&huart1, (uint8_t*)text, strlen(text), 0xFFFF);
+}
+
+
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
   
   uint32_t receiveTimeMs = HAL_GetTick();
